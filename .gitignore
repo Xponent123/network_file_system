@@ -1,0 +1,31 @@
+# Ignore build files
+*.o
+*.out
+*.a
+*.so
+*.exe
+*.log
+
+# Ignore CMake and Makefiles
+CMakeFiles/
+CMakeCache.txt
+Makefile
+
+# Ignore VS Code settings
+.vscode/
+
+# Ignore binaries or intermediate files
+client
+naming_server
+storage_server
+test_connection
+
+# Ignore backup files
+*~
+*.swp
+*.bak
+*.tmp
+
+# Ignore user-specific settings
+.DS_Store
+Thumbs.db
