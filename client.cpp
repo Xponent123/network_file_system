@@ -71,13 +71,15 @@ int main(int argc, char** argv) {
     std::string nm_ip = argv[1];
     int nm_port = std::stoi(argv[2]);
 
-    std::string command;
+    std::string lineInput;
     while (true) {
         std::cout << "Client> ";
-        if (!std::getline(std::cin, command) || command == "exit")
+        if (!std::getline(std::cin, lineInput) || lineInput == "exit")
             break;
-        if (command.empty())
+        if (lineInput.empty())
             continue;
+
+        std::string command = lineInput;
 
         // Step 1: Send request to Naming Server
         std::string nmResp = sendRequest(nm_ip, nm_port, command);
@@ -87,6 +89,12 @@ int main(int argc, char** argv) {
         }
 
         std::cout << "NM: " << nmResp << "\n";
+
+        // Handle special WRITE_NOTIFICATION responses from NM
+        if (nmResp.rfind("WRITE_NOTIFICATION", 0) == 0) {
+            std::cout << nmResp.substr(sizeof("WRITE_NOTIFICATION")) << "\n";
+            continue;
+        }
 
         // Step 2: Handle special responses or forward to Storage Server
         if (nmResp.rfind("IP:", 0) != 0) continue;
@@ -101,7 +109,10 @@ int main(int argc, char** argv) {
         std::cerr << "[DBG] Parsed SS IP: " << ss_ip << ", Port: " << ss_port << "\n";
 
         // Step 3: Handle STREAM separately if needed
-        if (command.rfind("STREAM", 0) == 0) {
+        std::istringstream streamCheckIss(command);
+        std::string streamCmdCheck;
+        streamCheckIss >> streamCmdCheck;
+        if (streamCmdCheck == "STREAM") {
             int sock = socket(AF_INET, SOCK_STREAM, 0);
             if (sock < 0) { perror("socket"); continue; }
 
@@ -128,7 +139,25 @@ int main(int argc, char** argv) {
             }
             std::cerr << "[DBG] Sent STREAM command: " << command << "\n";
 
-            // Simple streaming implementation - pipe directly to mpv
+            char initialBuffer[1024];
+            int initialBytes = recv(sock, initialBuffer, sizeof(initialBuffer) - 1, 0);
+
+            if (initialBytes <= 0) {
+                if (initialBytes < 0) perror("recv initial stream data");
+                else std::cerr << "ERROR: Storage server closed connection immediately.\n";
+                close(sock);
+                continue;
+            }
+
+            initialBuffer[initialBytes] = '\0';
+            std::string initialResponse(initialBuffer);
+
+            if (initialResponse.rfind("ERROR:", 0) == 0) {
+                std::cerr << "Storage Server Error: " << initialResponse << "\n";
+                close(sock);
+                continue;
+            }
+
             FILE *mpvPipe = popen("mpv --really-quiet -", "w");
             if (!mpvPipe) {
                 perror("popen(mpv)");
@@ -136,19 +165,24 @@ int main(int argc, char** argv) {
                 continue;
             }
 
-            char buffer[1024];
-            int bytes;
             std::cout << "Streaming audio... (Ctrl+C to stop)\n";
-            
-            // Read data from socket and pipe to mpv
-            while ((bytes = recv(sock, buffer, sizeof(buffer), 0)) > 0) {
-                fwrite(buffer, 1, bytes, mpvPipe);
+
+            fwrite(initialBuffer, 1, initialBytes, mpvPipe);
+
+            char streamBuffer[MAX_BUFFER];
+            int bytes;
+            while ((bytes = recv(sock, streamBuffer, sizeof(streamBuffer), 0)) > 0) {
+                size_t written = fwrite(streamBuffer, 1, bytes, mpvPipe);
+                if (written < bytes) {
+                     perror("fwrite to mpv pipe");
+                     break;
+                }
             }
 
             if (bytes < 0) {
                 perror("recv stream data");
             }
-            
+
             pclose(mpvPipe);
             close(sock);
             std::cout << "Stream finished.\n";

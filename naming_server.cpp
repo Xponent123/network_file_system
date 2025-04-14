@@ -154,6 +154,18 @@ static std::map<std::string, SSInfo> prefixRegistry;
 // Mutex to protect access to the registries during updates
 static std::mutex registryMutex;
 
+// Structure to track async write operations
+struct PendingWrite {
+    int clientSocket;      // Socket to client awaiting notification
+    std::string clientIP;
+    int clientPort;
+    bool notificationSent; // Has notification been sent?
+};
+
+// Map of write_id to client information
+static std::map<std::string, PendingWrite> pendingWrites;
+static std::mutex pendingWritesMutex;
+
 // send a string (all at once) over sock
 static void sendAll(int sock, const std::string& msg) {
     send(sock, msg.c_str(), msg.size(), 0);
@@ -249,6 +261,131 @@ static void handleClient(int clientSock) {
         return;
     }
 
+    // Handle WRITE_STATUS updates from storage servers
+    if (op == "WRITE_STATUS") {
+        // Parse: WRITE_STATUS <writeID> <SUCCESS|FAILURE> <IP> <port> <filename> <bytes>
+        std::string writeID, status, serverIP, filename;
+        int serverPort;
+        size_t bytes;
+        
+        iss >> writeID >> status >> serverIP >> serverPort >> filename >> bytes;
+        
+        if (writeID.empty() || (status != "SUCCESS" && status != "FAILURE")) {
+            logMessage("NM: Invalid WRITE_STATUS format received");
+            close(clientSock);
+            return;
+        }
+        
+        logMessage("NM: Received write status update - ID: " + writeID + ", Status: " + status);
+        
+        // Check if we have a pending write with this ID
+        {
+            std::lock_guard<std::mutex> lock(pendingWritesMutex);
+            auto it = pendingWrites.find(writeID);
+            if (it != pendingWrites.end() && !it->second.notificationSent) {
+                PendingWrite& pending = it->second;
+                
+                // Check if we need to forward this to a connected client
+                if (pending.clientSocket > 0) {
+                    // Fix: Ensure string concatenation starts with std::string
+                    std::string notification = std::string("WRITE_NOTIFICATION ") +
+                                              (status == "SUCCESS" ? "OK: " : "ERROR: ") +
+                                              "Async write to " + filename +
+                                              " completed with status " + status +
+                                              " (" + std::to_string(bytes) + " bytes)";
+                                              
+                    sendAll(pending.clientSocket, notification);
+                    logMessage("NM: Forwarded write notification to client: " + notification);
+                    
+                    // In a real system, we might not want to close the client socket here
+                    // if it's a persistent connection being used for multiple notifications
+                    close(pending.clientSocket);
+                    pending.clientSocket = -1;
+                }
+                
+                pending.notificationSent = true;
+                // Schedule cleanup of this entry after some time, or do it now
+                pendingWrites.erase(it);
+            }
+        }
+        
+        // Acknowledge receipt to the storage server
+        sendAll(clientSock, "OK: WRITE_STATUS received");
+        close(clientSock);
+        return;
+    }
+
+    // Handle WRITE with optional --SYNC flag
+    if (op == "WRITE") {
+        // Check if the second token is --SYNC
+        std::string pathOrFlag;
+        iss >> pathOrFlag;
+        
+        bool isSync = false;
+        std::string path;
+        
+        if (pathOrFlag == "--SYNC") {
+            isSync = true;
+            // Get the actual path
+            iss >> path;
+        } else {
+            // The second token was the path
+            path = pathOrFlag;
+        }
+        
+        if (path.empty()) {
+            std::string err = "ERROR: Missing path for WRITE";
+            sendAll(clientSock, err);
+            logMessage("NM: " + err);
+            close(clientSock);
+            return;
+        }
+        
+        // Add leading slash if not present
+        if (path[0] != '/') {
+            path = "/" + path;
+        }
+        
+        // Rest of the message is the data
+        std::string restOfMessage;
+        std::getline(iss, restOfMessage);
+        
+        // Find the storage server for this path
+        SSInfo target;
+        bool found;
+        { 
+            std::lock_guard<std::mutex> lock(registryMutex);
+            found = findSSForPath(path, target);
+        }
+        
+        if (!found) {
+            std::string err = "ERROR: No storage server for path " + path;
+            sendAll(clientSock, err);
+            logMessage("NM: " + err);
+            close(clientSock);
+            return;
+        }
+        
+        // Create the full write command
+        std::string writeCmd = "WRITE " + path;
+        if (isSync) {
+            writeCmd += " --SYNC"; // Add SYNC flag if requested
+        }
+        writeCmd += restOfMessage; // Add the data
+        
+        // At this point, we would forward the WRITE to the storage server as usual
+        std::string out = "IP: " + target.ip + " PORT: " + std::to_string(target.port);
+        sendAll(clientSock, out);
+        logMessage("NM → client: " + out + (isSync ? " (SYNC write)" : " (ASYNC write)"));
+        
+        // For async writes, we could add client info to pendingWrites map here
+        // But we would need a writeID, which is generated by the storage server
+        // This would be handled by a separate client registration for notifications
+        
+        close(clientSock);
+        return;
+    }
+
     // 2) LISTSERVERS: list all registered mount‑point prefixes
     if (op == "LISTSERVERS") {
         std::string out = "SERVERS ";
@@ -273,18 +410,23 @@ static void handleClient(int clientSock) {
     if (op == "COPY") {
         std::string sourcePath, destPath;
         iss >> sourcePath >> destPath;
-
         if (sourcePath.empty() || destPath.empty()) {
             sendAll(clientSock, "ERROR: Usage: COPY <source_path> <destination_path>");
             logMessage("NM: Invalid COPY command format.");
             close(clientSock);
             return;
         }
-
+        // Trim whitespace from sourcePath and destPath
+        auto trim = [](std::string &s) {
+            while (!s.empty() && isspace(s.front())) s.erase(s.begin());
+            while (!s.empty() && isspace(s.back())) s.pop_back();
+        };
+        trim(sourcePath);
+        trim(destPath);
         // Ensure paths start with '/'
         if (sourcePath[0] != '/') sourcePath = "/" + sourcePath;
         if (destPath[0] != '/') destPath = "/" + destPath;
-
+        
         SSInfo sourceSS, destSS;
         if (!findSSForPath(sourcePath, sourceSS)) {
             sendAll(clientSock, "ERROR: No storage server found for source path " + sourcePath);
@@ -298,34 +440,33 @@ static void handleClient(int clientSock) {
             close(clientSock);
             return;
         }
-
         logMessage("NM: Source SS: " + sourceSS.ip + ":" + std::to_string(sourceSS.port));
         logMessage("NM: Dest SS: " + destSS.ip + ":" + std::to_string(destSS.port));
-
-        // Connect to Destination SS to issue the PULL command
+        
         int destSock = socket(AF_INET, SOCK_STREAM, 0);
         if (destSock < 0) {
-             sendAll(clientSock, "ERROR: NM failed to create socket for copy command.");
+             sendAll(clientSock, "ERROR: NM failed to create socket for COPY command.");
              logMessage("NM: Failed to create socket for PULL_COPY_FROM.");
              close(clientSock);
              return;
         }
         sockaddr_in destAddr{};
         destAddr.sin_family = AF_INET;
-        destAddr.sin_port   = htons(destSS.port);
+        destAddr.sin_port = htons(destSS.port);
         inet_pton(AF_INET, destSS.ip.c_str(), &destAddr.sin_addr);
-
+        
         if (connect(destSock, (sockaddr*)&destAddr, sizeof(destAddr)) < 0) {
-            perror("NM connect to Dest SS");
-            sendAll(clientSock, "ERROR: NM failed to connect to destination storage server.");
-            logMessage("NM: Failed to connect to Dest SS " + destSS.ip + ":" + std::to_string(destSS.port));
-            close(destSock);
-            close(clientSock);
-            return;
+             perror("NM connect to Dest SS");
+             sendAll(clientSock, "ERROR: NM failed to connect to destination storage server.");
+             logMessage("NM: Failed to connect to Dest SS " + destSS.ip + ":" + std::to_string(destSS.port));
+             close(destSock);
+             close(clientSock);
+             return;
         }
-
-        // Send PULL command to Destination SS
-        std::string pullCmd = "PULL_COPY_FROM " + sourceSS.ip + " " + std::to_string(sourceSS.port) + " " + sourcePath + " " + destPath;
+        
+        // Build the pull command with exactly four tokens after the command keyword.
+        std::string pullCmd = "PULL_COPY_FROM " + sourceSS.ip + " " + std::to_string(sourceSS.port)
+                              + " " + sourcePath + " " + destPath;
         logMessage("NM: Sending to Dest SS: " + pullCmd);
         if (send(destSock, pullCmd.c_str(), pullCmd.size(), 0) < 0) {
              perror("NM send PULL_COPY_FROM");
@@ -335,29 +476,26 @@ static void handleClient(int clientSock) {
              close(clientSock);
              return;
         }
-
-        // Wait for ACK/ERROR from Destination SS on the *same socket*
+        
         char ackBuf[MAX_BUFFER];
         int ackBytes = recv(destSock, ackBuf, sizeof(ackBuf) - 1, 0);
-        close(destSock); // Close connection to Dest SS
-
+        close(destSock);
+        
         if (ackBytes <= 0) {
-            std::string errMsg = "ERROR: No response from destination server after copy command.";
-            if (ackBytes < 0) {
+             std::string errMsg = "ERROR: No response from destination server after copy command.";
+             if (ackBytes < 0) {
                  perror("NM recv ACK from Dest SS");
                  errMsg += " (recv error)";
-            }
-            sendAll(clientSock, errMsg);
-            logMessage("NM: " + errMsg);
+             }
+             sendAll(clientSock, errMsg);
+             logMessage("NM: " + errMsg);
         } else {
-            ackBuf[ackBytes] = '\0';
-            std::string destSSResponse(ackBuf);
-            logMessage("NM: Received from Dest SS: " + destSSResponse);
-            // Forward the response from Dest SS back to the original client
-            sendAll(clientSock, destSSResponse);
+             ackBuf[ackBytes] = '\0';
+             std::string destSSResponse(ackBuf);
+             logMessage("NM: Received from Dest SS: " + destSSResponse);
+             sendAll(clientSock, destSSResponse);
         }
-
-        close(clientSock); // Close connection to original client
+        close(clientSock);
         return;
     }
 
