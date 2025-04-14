@@ -488,6 +488,15 @@ void handleClient(int clientSocket, const std::string& sharedPath) {
     std::string op, firstArg; // Use firstArg for filename or source IP
     iss >> op >> firstArg;
 
+    // Add handler for heartbeat messages
+    if (op == "HEARTBEAT") {
+        std::string response = "HEARTBEAT_RESPONSE " + g_myIP + " " + std::to_string(g_myPort);
+        send(clientSocket, response.c_str(), response.size(), 0);
+        logMessage("Sent heartbeat response");
+        close(clientSocket);
+        return;
+    }
+
     // --- Existing Command Handling ---
     std::string filename = firstArg; // Use the parsed first argument as filename
 
