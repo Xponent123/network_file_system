@@ -72,6 +72,3 @@ The system supports asynchronous operations, file streaming, replication, and fa
 - POSIX-compliant system (Linux recommended)
 - Threads and sockets libraries
 
-### Build
-```bash
-make all
