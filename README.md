@@ -72,3 +72,35 @@ The system supports asynchronous operations, file streaming, replication, and fa
 - POSIX-compliant system (Linux recommended)
 - Threads and sockets libraries
 
+### Build
+
+```sh
+# From project root
+g++ naming_server.cpp common.cpp -o naming_server -lpthread
+g++ storage_server.cpp common.cpp -o storage_server -lpthread
+g++ client.cpp common.cpp -o client
+```
+
+### Run
+
+```sh
+# 1. Start Naming Server (default port 5055)
+./naming_server 5055
+
+# 2. Start Storage Server(s)
+./storage_server 5050 /path/to/storage1 "/prefix1,prefix2" 127.0.0.1 5055
+./storage_server 5051 /path/to/storage2 "/prefix3"         127.0.0.1 5055
+
+# 3. Start Client, pointing at the Naming Server
+./client 127.0.0.1 5055
+```
+
+Now at the `Client>` prompt you can issue commands like:
+```
+LISTSERVERS
+CREATE /foo/file.txt
+WRITE /foo/file.txt HelloWorld
+READ /foo/file.txt
+EXIT
+```
+

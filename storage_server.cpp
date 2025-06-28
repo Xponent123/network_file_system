@@ -128,27 +128,33 @@ void signalHandler(int signum) {
         logMessage("Skipping deregistration (missing server info).");
     }
 
+    // Log a final message before exiting the program
     logMessage("Storage Server shutting down.");
-    exit(signum); // Exit with the signal number
+    exit(signum); // Exit the program with the signal number as the exit code
 }
 
-// Added helper functions to replace filesystem namespace functions
+// Helper function to check if a file or directory exists at the specified path
+// Returns true if the path exists, false otherwise
 static bool path_exists(const std::string& path) {
-    struct stat buffer;
-    return (stat(path.c_str(), &buffer) == 0);
+    struct stat buffer; // Create a stat structure to hold file/directory information
+    return (stat(path.c_str(), &buffer) == 0); // Call stat() and return true if it succeeds (returns 0)
 }
 
+// Helper function to check if a path is a directory
+// Returns true if the path exists and is a directory, false otherwise
 static bool is_directory(const std::string& path) {
-    struct stat buffer;
-    if (stat(path.c_str(), &buffer) != 0) return false;
-    return S_ISDIR(buffer.st_mode);
+    struct stat buffer; // Create a stat structure to hold file/directory information
+    if (stat(path.c_str(), &buffer) != 0) return false; // If stat() fails, return false
+    return S_ISDIR(buffer.st_mode); // Check if the mode bits indicate it's a directory
 }
 
+// Helper function to get the parent directory of a path
+// For example, for "/foo/bar/file.txt" it returns "/foo/bar"
 static std::string get_parent_path(const std::string& path) {
-    size_t last_slash = path.find_last_of('/');
-    if (last_slash == std::string::npos) return ".";
-    if (last_slash == 0) return "/"; // Root directory
-    return path.substr(0, last_slash);
+    size_t last_slash = path.find_last_of('/'); // Find the position of the last slash in the path
+    if (last_slash == std::string::npos) return "."; // If no slash found, return current directory
+    if (last_slash == 0) return "/"; // If the only slash is at position 0, return root directory
+    return path.substr(0, last_slash); // Otherwise, return everything before the last slash
 }
 
 static bool create_directories(const std::string& dirPath) {
@@ -196,178 +202,193 @@ static std::string formatPermissions(mode_t mode) {
     if (mode & S_IXUSR) perms[3] = 'x';
     if (mode & S_IRGRP) perms[4] = 'r';
     if (mode & S_IWGRP) perms[5] = 'w';
-    if (mode & S_IXGRP) perms[6] = 'x';
-    if (mode & S_IROTH) perms[7] = 'r';
-    if (mode & S_IWOTH) perms[8] = 'w';
-    if (mode & S_IXOTH) perms[9] = 'x';
-    return perms;
+    if (mode & S_IXGRP) perms[6] = 'x'; // Check if the group has execute permission
+    if (mode & S_IROTH) perms[7] = 'r'; // Check if others have read permission
+    if (mode & S_IWOTH) perms[8] = 'w'; // Check if others have write permission
+    if (mode & S_IXOTH) perms[9] = 'x'; // Check if others have execute permission
+    return perms; // Return the formatted permissions string
 }
 
 // Helper function: Copy a single file from source to destination
+// Helper function: Copy a single file from a remote storage server to a local destination
 static bool copyFile(const std::string& sourceIp, int sourcePort,
                    const std::string& sourcePath, const std::string& destFullPath,
                    long long& totalBytes) {
+    // Log the start of the file copy operation
     logMessage("Copying file from " + sourcePath + " to " + destFullPath);
     
-    // 1. Connect to source server
-    int sourceSock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sourceSock < 0) {
-        logMessage("ERROR: Failed to create socket for file copy - " + std::string(strerror(errno)));
-        return false;
+    // 1. Create a socket to connect to the source server
+    int sourceSock = socket(AF_INET, SOCK_STREAM, 0); // Create a TCP socket
+    if (sourceSock < 0) { // Check if socket creation failed
+        logMessage("ERROR: Failed to create socket for file copy - " + std::string(strerror(errno))); // Log the error
+        return false; // Return false to indicate failure
     }
     
-    sockaddr_in sourceAddr{};
-    sourceAddr.sin_family = AF_INET;
-    sourceAddr.sin_port = htons(sourcePort);
-    if (inet_pton(AF_INET, sourceIp.c_str(), &sourceAddr.sin_addr) <= 0) {
-        logMessage("ERROR: Invalid source IP for file copy");
-        close(sourceSock);
-        return false;
+    // 2. Set up the address structure for the source server
+    sockaddr_in sourceAddr{}; // Initialize the address structure to zero
+    sourceAddr.sin_family = AF_INET; // Specify IPv4 address family
+    sourceAddr.sin_port = htons(sourcePort); // Convert the port number to network byte order
+    // Convert the source IP address from string to binary form and store in the address structure
+    if (inet_pton(AF_INET, sourceIp.c_str(), &sourceAddr.sin_addr) <= 0) { // If conversion fails
+        logMessage("ERROR: Invalid source IP for file copy"); // Log the error
+        close(sourceSock); // Close the socket to release resources
+        return false; // Return false to indicate failure
     }
     
-    if (connect(sourceSock, (sockaddr*)&sourceAddr, sizeof(sourceAddr)) < 0) {
-        logMessage("ERROR: Failed to connect to source server for file copy - " + std::string(strerror(errno)));
-        close(sourceSock);
-        return false;
+    // 3. Attempt to connect to the source server
+    if (connect(sourceSock, (sockaddr*)&sourceAddr, sizeof(sourceAddr)) < 0) { // Try to establish a connection
+        logMessage("ERROR: Failed to connect to source server for file copy - " + std::string(strerror(errno))); // Log the error
+        close(sourceSock); // Close the socket to release resources
+        return false; // Return false to indicate failure
     }
     
-    // 2. Send READ command
-    std::string readCmd = "READ " + sourcePath;
-    if (send(sourceSock, readCmd.c_str(), readCmd.size(), 0) < 0) {
-        logMessage("ERROR: Failed to send READ command for file copy - " + std::string(strerror(errno)));
-        close(sourceSock);
-        return false;
+    // 4. Send READ command to the source server to request the file
+    std::string readCmd = "READ " + sourcePath; // Prepare the command string
+    if (send(sourceSock, readCmd.c_str(), readCmd.size(), 0) < 0) { // Send the command over the socket
+        logMessage("ERROR: Failed to send READ command for file copy - " + std::string(strerror(errno))); // Log the error
+        close(sourceSock); // Close the socket to release resources
+        return false; // Return false to indicate failure
     }
     
-    // 3. Receive the *first* chunk to check for errors BEFORE opening the output file
-    char initialBuffer[2048];
-    int initialBytesReceived = recv(sourceSock, initialBuffer, sizeof(initialBuffer), 0);
+    // 5. Receive the *first* chunk to check for errors BEFORE opening the output file
+    char initialBuffer[2048]; // Buffer to hold the first chunk of data
+    int initialBytesReceived = recv(sourceSock, initialBuffer, sizeof(initialBuffer), 0); // Receive data
 
-    if (initialBytesReceived <= 0) {
-        if (initialBytesReceived < 0) {
+    if (initialBytesReceived <= 0) { // If nothing received or error
+        if (initialBytesReceived < 0) { // If error occurred
             logMessage("ERROR: Failed receiving initial data for file copy - " + std::string(strerror(errno)));
-        } else {
+        } else { // If connection closed or no data
             logMessage("ERROR: Received empty response from source server for READ " + sourcePath);
         }
-        close(sourceSock);
+        close(sourceSock); // Close the socket
         return false; // Indicate failure
     }
 
     // Check if the initial response is an error message from the source server
-    std::string initialResponse(initialBuffer, initialBytesReceived);
-    if (initialResponse.rfind("ERROR:", 0) == 0) {
+    std::string initialResponse(initialBuffer, initialBytesReceived); // Convert buffer to string
+    if (initialResponse.rfind("ERROR:", 0) == 0) { // If response starts with "ERROR:"
         logMessage("ERROR: Source server failed to read file: " + sourcePath + " - " + initialResponse);
-        close(sourceSock);
+        close(sourceSock); // Close the socket
         return false; // Source reported error, fail the copy
     }
 
-    // 4. Ensure destination directory exists *before* opening the file
-    std::string destDir = get_parent_path(destFullPath);
-    if (!path_exists(destDir)) {
+    // 6. Ensure destination directory exists *before* opening the file
+    std::string destDir = get_parent_path(destFullPath); // Get the parent directory of the destination file
+    if (!path_exists(destDir)) { // If the directory does not exist
         logMessage("Destination directory " + destDir + " does not exist, attempting to create.");
-        if (!create_directories(destDir)) {
+        if (!create_directories(destDir)) { // Try to create the directory
             logMessage("ERROR: Failed to create destination directory: " + destDir);
-            close(sourceSock);
+            close(sourceSock); // Close the socket
             return false;
         }
-    } else if (!is_directory(destDir)) {
+    } else if (!is_directory(destDir)) { // If the path exists but is not a directory
         logMessage("ERROR: Destination path's parent is not a directory: " + destDir);
-        close(sourceSock);
+        close(sourceSock); // Close the socket
         return false;
     }
 
-    // 5. Open destination file *only after confirming no initial error and dir exists*
-    std::ofstream outFile(destFullPath, std::ios::binary | std::ios::trunc);
-    if (!outFile) {
+    // 7. Open destination file *only after confirming no initial error and dir exists*
+    std::ofstream outFile(destFullPath, std::ios::binary | std::ios::trunc); // Open file for binary write, overwrite if exists
+    if (!outFile) { // If file could not be opened
         logMessage("ERROR: Cannot open destination file: " + destFullPath + " - " + strerror(errno));
-        close(sourceSock);
+        close(sourceSock); // Close the socket
         return false;
     }
 
-    // 5. Write the initial chunk and stream the rest
-    outFile.write(initialBuffer, initialBytesReceived);
-    if (!outFile) {
+    // 8. Write the initial chunk and stream the rest
+    outFile.write(initialBuffer, initialBytesReceived); // Write the first chunk to the file
+    if (!outFile) { // If write failed
         logMessage("ERROR: Failed writing initial chunk to destination file: " + destFullPath);
-        outFile.close();
-        close(sourceSock);
+        outFile.close(); // Close the file
+        close(sourceSock); // Close the socket
         return false;
     }
-    long long fileSize = initialBytesReceived;
+    long long fileSize = initialBytesReceived; // Track the total bytes written
 
-    char streamBuffer[2048];
+    // Continue receiving and writing the rest of the file in chunks
+    char streamBuffer[2048]; // Buffer for subsequent chunks
     int bytesReceived;
-    while ((bytesReceived = recv(sourceSock, streamBuffer, sizeof(streamBuffer), 0)) > 0) {
-        outFile.write(streamBuffer, bytesReceived);
-        if (!outFile) {
+    while ((bytesReceived = recv(sourceSock, streamBuffer, sizeof(streamBuffer), 0)) > 0) { // While data is received
+        outFile.write(streamBuffer, bytesReceived); // Write chunk to file
+        if (!outFile) { // If write failed
             logMessage("ERROR: Failed writing chunk to destination file: " + destFullPath);
-            outFile.close();
-            close(sourceSock);
+            outFile.close(); // Close the file
+            close(sourceSock); // Close the socket
             return false;
         }
-        fileSize += bytesReceived;
+        fileSize += bytesReceived; // Add to total bytes written
     }
 
-    outFile.close();
-    close(sourceSock);
+    outFile.close(); // Close the output file
+    close(sourceSock); // Close the socket to the source server
 
-    if (bytesReceived < 0) {
+    if (bytesReceived < 0) { // If there was a receive error
         logMessage("ERROR: Failed receiving subsequent data for file copy - " + std::string(strerror(errno)));
         return false;
     }
 
-    // Update total bytes copied
+    // Update total bytes copied by adding the size of the file just copied.
+    // This is a reference parameter, so it updates the total for the entire copy operation.
     totalBytes += fileSize;
-    return true;
+    return true; // Return true to indicate that the file was copied successfully.
 }
 
-// Helper function: Copy directory recursively
+// Helper function: Copies a directory and its contents recursively from a source server.
 static bool copyDirectoryRecursive(const std::string& sourceIp, int sourcePort, 
                                  const std::string& sourcePath, const std::string& destPath,
                                  const std::string& sharedPath, long long& totalBytes) {
-    // Convert source and dest to relative paths for storage server requests
+    // Create local copies of the source and destination paths.
     std::string sourceRelPath = sourcePath;
     std::string destRelPath = destPath;
     
-    // Get directory listing from source *first*
+    // To copy a directory, we first need to get a list of its contents from the source server.
+    // We create a new socket for this purpose.
+    // AF_INET: Use IPv4 addresses.
+    // SOCK_STREAM: Use TCP, a reliable connection-based protocol.
+    // 0: Use the default protocol for TCP.
     int listSock = socket(AF_INET, SOCK_STREAM, 0);
-    if (listSock < 0) {
+    if (listSock < 0) { // Check if the socket creation failed.
         logMessage("ERROR: Failed to create socket for directory listing - " + std::string(strerror(errno)));
-        return false;
+        return false; // Return false to indicate failure.
     }
     
-    sockaddr_in sourceAddr{};
-    sourceAddr.sin_family = AF_INET;
-    sourceAddr.sin_port = htons(sourcePort);
+    // Set up the address information for the source server we want to connect to.
+    sockaddr_in sourceAddr{}; // Initialize the address structure to all zeros.
+    sourceAddr.sin_family = AF_INET; // Specify the address family is IPv4.
+    sourceAddr.sin_port = htons(sourcePort); // Convert the port number from host byte order to network byte order.
+    // Convert the IP address string (e.g., "127.0.0.1") to its binary network format.
     if (inet_pton(AF_INET, sourceIp.c_str(), &sourceAddr.sin_addr) <= 0) {
         logMessage("ERROR: Invalid source IP for directory listing");
-        close(listSock);
-        return false;
+        close(listSock); // Close the socket before returning.
+        return false; // Return false to indicate failure.
     }
     
-    if (connect(listSock, (sockaddr*)&sourceAddr, sizeof(sourceAddr)) < 0) {
-        logMessage("ERROR: Failed to connect to source server for directory listing - " + std::string(strerror(errno)));
-        close(listSock);
-        return false;
+    // 3. Attempt to connect to the source server
+    if (connect(listSock, (sockaddr*)&sourceAddr, sizeof(sourceAddr)) < 0) { // Try to establish a connection
+        logMessage("ERROR: Failed to connect to source server for directory listing - " + std::string(strerror(errno))); // Log the error
+        close(listSock); // Close the socket to release resources
+        return false; // Return false to indicate failure
     }
     
-    // Send LIST command
-    std::string listCmd = "LIST " + sourceRelPath;
-    if (send(listSock, listCmd.c_str(), listCmd.size(), 0) < 0) {
-        logMessage("ERROR: Failed to send LIST command - " + std::string(strerror(errno)));
-        close(listSock);
-        return false;
+    // Send LIST command to request the directory contents
+    std::string listCmd = "LIST " + sourceRelPath; // Prepare the command string
+    if (send(listSock, listCmd.c_str(), listCmd.size(), 0) < 0) { // Send the command over the socket
+        logMessage("ERROR: Failed to send LIST command - " + std::string(strerror(errno))); // Log the error
+        close(listSock); // Close the socket to release resources
+        return false; // Return false to indicate failure
     }
 
-    // Receive directory listing response
-    char listBuffer[8192];
-    std::string listing = "";
+    // Receive the directory listing response from the source server
+    char listBuffer[8192]; // Buffer to hold the directory listing
+    std::string listing = ""; // String to accumulate the received listing
     int bytesReceived;
 
+    // Keep receiving data until there's no more or an error occurs
     while ((bytesReceived = recv(listSock, listBuffer, sizeof(listBuffer) - 1, 0)) > 0) {
-        listBuffer[bytesReceived] = '\0';
-        listing.append(listBuffer, bytesReceived);
+        listBuffer[bytesReceived] = '\0'; // Null-terminate the received data
+        listing.append(listBuffer, bytesReceived); // Append to the listing string
     }
-    close(listSock);
+    close(listSock); // Close the socket after receiving the complete listing
 
     if (bytesReceived < 0) {
          logMessage("ERROR: Failed to receive directory listing - " + std::string(strerror(errno)));
@@ -378,6 +399,7 @@ static bool copyDirectoryRecursive(const std::string& sourceIp, int sourcePort,
          return false;
     }
 
+    // Check for errors in the directory listing response
     if (listing.rfind("ERROR:", 0) == 0) {
         logMessage("ERROR: Source server failed to list directory: " + sourceRelPath + " - " + listing);
         return false;
@@ -414,31 +436,35 @@ static bool copyDirectoryRecursive(const std::string& sourceIp, int sourcePort,
         logMessage("Created destination directory: " + destFullPath);
     }
 
-    // Parse listing and process entries
+    // Parse the received directory listing and process each entry
     std::istringstream iss(listing);
     std::string line;
     bool headerSkipped = false;
 
+    // Skip the header line(s) and process each subsequent line as a file/directory name
     while (std::getline(iss, line)) {
         if (!headerSkipped) {
-            headerSkipped = true;
+            headerSkipped = true; // Skip the first line (header)
             continue;
         }
         if (line.empty() || line == "Directory is empty.")
-            continue;
+            continue; // Skip empty lines or "Directory is empty." message
 
+        // Construct the source and destination paths for the entry
         std::string entrySourcePath = sourceRelPath + "/" + line;
         std::string entryDestPath = destRelPath + "/" + line;
 
+        // Ensure the source and destination paths start with '/'
         if (entrySourcePath[0] != '/') entrySourcePath = "/" + entrySourcePath;
         if (entryDestPath[0] != '/') entryDestPath = "/" + entryDestPath;
 
+        // Check if the entry is a file or a subdirectory by sending a LIST command to the source server
         int checkSock = socket(AF_INET, SOCK_STREAM, 0);
-        if (checkSock < 0) continue;
+        if (checkSock < 0) continue; // Skip if socket creation fails
 
         if (connect(checkSock, (sockaddr*)&sourceAddr, sizeof(sourceAddr)) < 0) {
             close(checkSock);
-            continue;
+            continue; // Skip if connection fails
         }
 
         std::string checkCmd = "LIST " + entrySourcePath;
@@ -453,10 +479,11 @@ static bool copyDirectoryRecursive(const std::string& sourceIp, int sourcePort,
             checkBuf[checkBytes] = '\0';
             std::string checkResp(checkBuf);
             if (checkResp.rfind("ERROR:", 0) != 0) {
-                isSubDir = true;
+                isSubDir = true; // If no error in response, it's a subdirectory
             }
         }
 
+        // Recursively copy the subdirectory or copy the file
         if (isSubDir) {
             if (!copyDirectoryRecursive(sourceIp, sourcePort, entrySourcePath, entryDestPath, sharedPath, totalBytes)) {
                 logMessage("WARNING: Failed to copy subdirectory: " + entrySourcePath);
@@ -469,7 +496,7 @@ static bool copyDirectoryRecursive(const std::string& sourceIp, int sourcePort,
         }
     }
 
-    return true;
+    return true; // Return true to indicate the directory was copied successfully
 }
 
 void handleClient(int clientSocket, const std::string& sharedPath) {
@@ -851,7 +878,61 @@ void handleClient(int clientSocket, const std::string& sharedPath) {
         }
     }
     else if (op == "LIST") {
-        // ... existing LIST logic ...
+                   // write code to list all files present in the folder LIST folder
+        if (filename.empty()) {
+            std::string err = "ERROR: Invalid LIST. Usage: LIST <path>";
+            send(clientSocket, err.c_str(), err.size(), 0);
+            logMessage(err);
+            close(clientSocket);
+            return;
+        }
+
+        std::string fullPath = sharedPath + "/" + filename;
+        struct stat st;
+
+        if (stat(fullPath.c_str(), &st) != 0) { // Check existence
+            std::string err = "ERROR: Path not found or cannot access: " + filename + " (" + strerror(errno) + ")";
+            send(clientSocket, err.c_str(), err.size(), 0);
+            logMessage(err);
+            close(clientSocket);
+            return;
+        }
+        if (!S_ISDIR(st.st_mode)) { // Check if it's a directory
+             std::string err = "ERROR: Path is not a directory: " + filename;
+             send(clientSocket, err.c_str(), err.size(), 0);
+             logMessage(err);
+             close(clientSocket);
+             return;
+        }
+
+        // Directory exists and is valid, proceed with listing
+        logMessage("Listing directory: " + filename);
+        std::ostringstream oss;
+        oss << "OK: Listing for " << filename << "\n";
+
+        DIR* dir = opendir(fullPath.c_str());
+        if (!dir) {
+            std::string err = "ERROR: Cannot open directory for listing: " + filename + " (" + strerror(errno) + ")";
+            send(clientSocket, err.c_str(), err.size(), 0);
+            logMessage(err);
+            closedir(dir); // Close the directory stream
+            close(clientSocket); // Close socket after error
+            return;
+        }
+
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != nullptr) {
+            if (entry->d_name[0] == '.') continue; // Skip hidden files/directories
+            oss << entry->d_name << "\n"; // Append each entry to the output
+        }
+        closedir(dir); // Close the directory stream
+
+        std::string listResponse = oss.str();
+        send(clientSocket, listResponse.c_str(), listResponse.size(), 0); // Send the complete listing
+        logMessage("Sent listing for: " + filename);
+        close(clientSocket); // Close the socket after sending the listing
+        return; // Return early as LIST handles its own socket closing
+
     }
     else if (op == "STREAM") {
         if (filename.empty()) {
